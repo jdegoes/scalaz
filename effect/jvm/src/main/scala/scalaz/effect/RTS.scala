@@ -461,7 +461,7 @@ private object RTS {
                 val id = enterAsyncStart()
 
                 try {
-                  io.register(resumeAsync(_)) match {
+                  io.register(resumeAsync) match {
                     case AsyncReturn.Now(value) =>
                       // Value returned synchronously, callback will never be
                       // invoked. Attempt resumption now:
@@ -797,7 +797,7 @@ private object RTS {
 
     final def interrupt(t: Throwable): IO[Unit] = IO.async0(kill1(t, _))
 
-    final def join: IO[A] = IO.async0(join1(_))
+    final def join: IO[A] = IO.async0(join1)
 
     final def enterSupervision: IO[Unit] = IO.sync {
       supervising += 1
