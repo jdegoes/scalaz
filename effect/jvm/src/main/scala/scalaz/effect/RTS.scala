@@ -39,23 +39,24 @@ trait RTS {
 
     context.evalSync(io)
 
-    (context.register { (r: Try[A]) =>
+    context.register { (r: Try[A]) =>
+      lock.lock()
       try {
-        lock.lock()
-
         result = r
 
         done.signal()
       } finally lock.unlock()
-    }) match {
+    } match {
       case AsyncReturn.Now(v) =>
-        result = v.asInstanceOf[Try[A]]
+        result = v
 
       case _ =>
-        while (result == null) try {
+        while (result == null) {
           lock.lock()
-          done.await()
-        } finally lock.unlock()
+          try {
+            done.await()
+          } finally lock.unlock()
+        }
     }
 
     result
@@ -461,7 +462,7 @@ private object RTS {
                 val id = enterAsyncStart()
 
                 try {
-                  io.register(resumeAsync(_)) match {
+                  io.register(resumeAsync) match {
                     case AsyncReturn.Now(value) =>
                       // Value returned synchronously, callback will never be
                       // invoked. Attempt resumption now:
@@ -720,8 +721,7 @@ private object RTS {
       IO.flatten(IO.async0[IO[C]] { resume =>
         val state = new AtomicReference[RaceState](Started)
 
-        def callback[A1, B1](other: Fiber[B1], finish: (A1, Fiber[B1]) => IO[C]): Try[A1] => Unit = (t0: Try[A1]) => {
-          val tryA = t0.asInstanceOf[Try[A1]]
+        def callback[A1, B1](other: Fiber[B1], finish: (A1, Fiber[B1]) => IO[C]): Try[A1] => Unit = (tryA: Try[A1]) => {
 
           var loop = true
           var action: () => Unit = null
@@ -797,7 +797,7 @@ private object RTS {
 
     final def interrupt(t: Throwable): IO[Unit] = IO.async0(kill1(t, _))
 
-    final def join: IO[A] = IO.async0(join1(_))
+    final def join: IO[A] = IO.async0(join1)
 
     final def enterSupervision: IO[Unit] = IO.sync {
       supervising += 1
