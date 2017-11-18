@@ -39,23 +39,24 @@ trait RTS {
 
     context.evalSync(io)
 
-    (context.register { (r: Try[A]) =>
+    context.register { (r: Try[A]) =>
+      lock.lock()
       try {
-        lock.lock()
-
         result = r
 
         done.signal()
       } finally lock.unlock()
-    }) match {
+    } match {
       case AsyncReturn.Now(v) =>
         result = v.asInstanceOf[Try[A]]
 
       case _ =>
-        while (result == null) try {
+        while (result == null) {
           lock.lock()
-          done.await()
-        } finally lock.unlock()
+          try {
+            done.await()
+          } finally lock.unlock()
+        }
     }
 
     result
