@@ -48,7 +48,7 @@ trait RTS {
       } finally lock.unlock()
     } match {
       case AsyncReturn.Now(v) =>
-        result = v.asInstanceOf[Try[A]]
+        result = v
 
       case _ =>
         while (result == null) {
@@ -721,8 +721,7 @@ private object RTS {
       IO.flatten(IO.async0[IO[C]] { resume =>
         val state = new AtomicReference[RaceState](Started)
 
-        def callback[A1, B1](other: Fiber[B1], finish: (A1, Fiber[B1]) => IO[C]): Try[A1] => Unit = (t0: Try[A1]) => {
-          val tryA = t0.asInstanceOf[Try[A1]]
+        def callback[A1, B1](other: Fiber[B1], finish: (A1, Fiber[B1]) => IO[C]): Try[A1] => Unit = (tryA: Try[A1]) => {
 
           var loop = true
           var action: () => Unit = null
