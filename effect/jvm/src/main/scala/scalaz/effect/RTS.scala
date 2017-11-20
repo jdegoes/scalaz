@@ -1,17 +1,16 @@
 // Copyright (C) 2017 John A. De Goes. All rights reserved.
 package scalaz.effect
 
-import scala.annotation.switch
-import scala.annotation.tailrec
-import scala.concurrent.duration.Duration
-
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import java.util.concurrent.{Executors, TimeUnit}
-import java.lang.{Runnable, Runtime}
 
+import scala.annotation.{switch, tailrec}
+import scala.concurrent.duration.Duration
 import scalaz.data.Disjunction._
 import scalaz.data.Maybe
+import scalaz.effect.IO.IOTrampoline
+import scalaz.effect.IO.IOTrampoline.{IOTDone, IOTMore}
 
 /**
  * This trait provides a high-performance implementation of a runtime system for
@@ -193,9 +192,11 @@ private object RTS {
    * An implementation of Fiber that maintains context necessary for evaluation.
    */
   final class FiberContext[A](rts: RTS, val unhandled: Throwable => IO[Unit]) extends Fiber[A] {
+    import java.util.{Collections, Set, WeakHashMap}
+
+    import rts.{MaxResumptionDepth, YieldMaxOpCount}
+
     import FiberStatus._
-    import java.util.{WeakHashMap, Collections, Set}
-    import rts.{YieldMaxOpCount, MaxResumptionDepth}
 
     // Accessed from multiple threads:
     private[this] val status = new AtomicReference[FiberStatus[A]](FiberStatus.Initial[A])
@@ -608,6 +609,31 @@ private object RTS {
 
                     curIo = enterSupervision *>
                       io.value.ensuring(exitSupervision(io.error))
+
+                  case IO.Tags.Trampoline =>
+                    val io  = curIo.asInstanceOf[IO.Trampoline[Any]]
+
+                    try {
+                      val value = io.effect()
+
+                      value match {
+                        case IOTMore(ioMore) =>
+                          // TODO: add the mini-interpreter here too for faster LHS evaluation
+                          stack.push(more => IO.trampoline(more.asInstanceOf[IOTrampoline[Any]]))
+
+                          curIo = ioMore.asInstanceOf[IO[Any]]
+                        case IOTDone(done) =>
+                          curIo = nextInstr(done, stack)
+
+                          if (curIo == null) {
+                            eval   = false
+                            result = \/-(done)
+                          }
+                      }
+                    } catch {
+                      case t : Throwable if nonFatal(t) =>
+                        curIo = IO.Fail(t)
+                    }
                 }
               }
             } else {
