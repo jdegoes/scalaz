@@ -384,6 +384,7 @@ object IO extends IOInstances {
     final val Uninterruptible   = 11
     final val Sleep             = 12
     final val Supervise         = 13
+    final val Trampoline        = 14
   }
   final case class FlatMap[A0, A](io: IO[A0], flatMapper: A0 => IO[A]) extends IO[A] {
     override final def tag = Tags.FlatMap
@@ -441,6 +442,16 @@ object IO extends IOInstances {
     override final def tag = Tags.Supervise
   }
 
+  sealed trait IOTrampoline[A]
+  object IOTrampoline {
+    final case class IOTMore[A](io: IO[IOTrampoline[A]]) extends IOTrampoline[A]
+    final case class IOTDone[A](value: A) extends IOTrampoline[A]
+  }
+
+  final case class Trampoline[A](effect: () => IOTrampoline[A]) extends IO[A] {
+    override final def tag = Tags.Trampoline
+  }
+
   /**
    * Lifts a strictly evaluated value into the `IO` monad.
    */
@@ -474,6 +485,8 @@ object IO extends IOInstances {
    * own termination.
    */
   final def supervise[A](io: IO[A], error: Throwable): IO[A] = Supervise(io, error)
+
+  final def trampoline[A](effect: => IOTrampoline[A]): IO[A] = Trampoline[A](() => effect)
 
   /**
    * Flattens a nested action.
