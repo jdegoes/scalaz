@@ -472,12 +472,12 @@ private object RTS {
 
                         if (curIo == null) {
                           eval   = false
-                          result = \/-(value)
+                          result = value
                         }
                       } else {
                         // Must run finalizer first:
                         val reported  = dispatchErrors(finalizer)
-                        val completer = IO.now[Any](\/-(value))
+                        val completer = IO.now[Any](value)
 
                         // Do not interrupt finalization:
                         this.noInterrupt += 1
@@ -701,10 +701,10 @@ private object RTS {
 
           if (finalizer == null) {
             if (stack.isEmpty()) done(value.asInstanceOf[Try[A]])
-            else continueWithValue(value, \/-(value))
+            else continueWithValue(value, value)
           } else {
             val reported  = dispatchErrors(finalizer)
-            val completer = if (stack.isEmpty()) IO.fail(t) else IO.now(\/-(value))
+            val completer = if (stack.isEmpty()) IO.fail(t) else IO.now(value)
 
             // Do not interrupt finalization:
             this.noInterrupt += 1
