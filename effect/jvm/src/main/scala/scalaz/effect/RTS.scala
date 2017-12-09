@@ -701,7 +701,7 @@ private object RTS {
 
           if (finalizer == null) {
             if (stack.isEmpty()) done(value.asInstanceOf[Try[A]])
-            else continueWithValue(value, \/-(value))
+            else continueWithValue(value, value)
           } else {
             val reported  = dispatchErrors(finalizer)
             val completer = if (stack.isEmpty()) IO.fail(t) else IO.now(value)
