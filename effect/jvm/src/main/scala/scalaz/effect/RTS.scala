@@ -10,15 +10,92 @@ import java.util.concurrent.locks.ReentrantLock
 import java.util.concurrent.{Executors, TimeUnit}
 import java.lang.{Runnable, Runtime}
 
+import scala.concurrent.{Future, Promise}
+import scala.util.{Failure, Success}
 import scalaz.data.Disjunction._
 import scalaz.data.Maybe
+
+// Could be just named RTS, and the current RTS could be renamed to e.g. BlockingIntepreter
+trait RTSLike {
+  def submit[A](block: => A): Unit
+
+  def schedule[A](block: => A, duration: Duration): AsyncReturn[Unit]
+}
+
+final class DefaultRTS extends RTSLike {
+
+  /**
+   * The main thread pool used for executing fibers.
+   */
+  private val threadPool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors().max(2))
+
+  private lazy val scheduledExecutor = Executors.newScheduledThreadPool(1)
+
+  def submit[A](block: => A): Unit = {
+    threadPool.submit(new Runnable {
+      def run: Unit = { block; () }
+    })
+
+    ()
+  }
+
+  def schedule[A](block: => A, duration: Duration): AsyncReturn[Unit] =
+    if (duration == Duration.Zero) {
+      submit(block)
+
+      AsyncReturn.later[Unit]
+    } else {
+      val future = scheduledExecutor.schedule(
+        new Runnable {
+          def run: Unit = { submit(block) }
+        }, duration.toNanos, TimeUnit.NANOSECONDS)
+
+      AsyncReturn.maybeLater { (t: Throwable) => future.cancel(true); () }
+    }
+
+  def shutdown(): Unit = {
+    threadPool.shutdown()
+    scheduledExecutor.shutdown()
+  }
+}
+
+trait IOInterpreter[F[_]] {
+
+  def tryUnsafePerformIO[A](io: IO[A]): F[A]
+
+}
+
+case class FutureIOInterpreter(rts: RTSLike) extends IOInterpreter[Future] {
+
+  import RTS._
+
+  def tryUnsafePerformIO[A](io: IO[A]): Future[A] = {
+    val context = new FiberContext[A](rts)
+    context.evaluate(io)
+
+    val promise = Promise[A]()
+    context.register { (r: Try[A]) =>
+      promise.tryComplete(r.fold[scala.util.Try[A]](Failure.apply)(Success.apply))
+      ()
+    } match {
+      case AsyncReturn.Now(v) =>
+        Future.fromTry(v.fold[scala.util.Try[A]](Failure.apply)(Success.apply))
+      case _ =>
+        promise.future
+    }
+  }
+}
 
 /**
  * This trait provides a high-performance implementation of a runtime system for
  * the `IO` monad on the JVM.
  */
-trait RTS {
+// Could be renamed to BlockingIntepreter
+trait RTS extends IOInterpreter[Throwable \/ ?] {
+
   import RTS._
+
+  final val rts = new DefaultRTS
 
   /**
    * Effectfully and synchronously interprets an `IO[A]`, either throwing an
@@ -35,7 +112,7 @@ trait RTS {
     lazy val lock = new ReentrantLock()
     lazy val done = lock.newCondition()
 
-    val context = new FiberContext[A](this, defaultHandler)
+    val context = new FiberContext[A](rts)
 
     context.evaluate(io)
 
@@ -62,55 +139,7 @@ trait RTS {
     result
   }
 
-  /**
-   * The default handler for unhandled exceptions in the main fiber, and any
-   * fibers it forks that recursively inherit the handler.
-   */
-  val defaultHandler: Throwable => IO[Unit] =
-    (t: Throwable) => IO.sync(t.printStackTrace())
 
-  /**
-   * The main thread pool used for executing fibers.
-   */
-  val threadPool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors().max(2))
-
-  /**
-   * This determines the maximum number of resumptions placed on the stack
-   * before a fiber is shifted over to a new thread to prevent stack overflow.
-   */
-  val MaxResumptionDepth = 10
-
-  /**
-   * Determines the maximum number of operations executed by a fiber before
-   * yielding to other fibers.
-   *
-   * FIXME: Replace this entirely with the new scheme.
-   */
-  final val YieldMaxOpCount = 1048576
-
-  lazy val scheduledExecutor = Executors.newScheduledThreadPool(1)
-
-  final def submit[A](block: => A): Unit = {
-    threadPool.submit(new Runnable {
-      def run: Unit = { block; () }
-    })
-
-    ()
-  }
-
-  final def schedule[A](block: => A, duration: Duration): AsyncReturn[Unit] =
-    if (duration == Duration.Zero) {
-      submit(block)
-
-      AsyncReturn.later[Unit]
-    } else {
-      val future = scheduledExecutor.schedule(
-        new Runnable {
-          def run: Unit = { submit(block) }
-        }, duration.toNanos, TimeUnit.NANOSECONDS)
-
-      AsyncReturn.maybeLater { (t: Throwable) => future.cancel(true); () }
-    }
 }
 
 private object RTS {
@@ -190,12 +219,32 @@ private object RTS {
   }
 
   /**
+   * This determines the maximum number of resumptions placed on the stack
+   * before a fiber is shifted over to a new thread to prevent stack overflow.
+   */
+  val MaxResumptionDepth = 10
+
+  /**
+   * Determines the maximum number of operations executed by a fiber before
+   * yielding to other fibers.
+   *
+   * FIXME: Replace this entirely with the new scheme.
+   */
+  final val YieldMaxOpCount = 1048576
+
+  /**
+   * The default handler for unhandled exceptions in the main fiber, and any
+   * fibers it forks that recursively inherit the handler.
+   */
+  private val defaultHandler: Throwable => IO[Unit] =
+    (t: Throwable) => IO.sync(t.printStackTrace())
+
+  /**
    * An implementation of Fiber that maintains context necessary for evaluation.
    */
-  final class FiberContext[A](rts: RTS, val unhandled: Throwable => IO[Unit]) extends Fiber[A] {
+  final class FiberContext[A](rts: RTSLike, val unhandled: Throwable => IO[Unit] = defaultHandler) extends Fiber[A] {
     import FiberStatus._
     import java.util.{WeakHashMap, Collections, Set}
-    import rts.{YieldMaxOpCount, MaxResumptionDepth}
 
     // Accessed from multiple threads:
     private[this] val status = new AtomicReference[FiberStatus[A]](FiberStatus.Initial[A])
